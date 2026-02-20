@@ -48,6 +48,21 @@ class MusicLlama:
         return new_state_dict
 
     @staticmethod
+    def _filter_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> Tuple[dict, List[str]]:
+        """Keep only checkpoint tensors that exist in model with matching shapes."""
+        model_state = model.state_dict()
+        filtered = {}
+        skipped = []
+        for key, value in state_dict.items():
+            if key not in model_state:
+                continue
+            if hasattr(value, "shape") and model_state[key].shape != value.shape:
+                skipped.append(key)
+                continue
+            filtered[key] = value
+        return filtered, skipped
+
+    @staticmethod
     def build(
         ckpt_dir: str,
         model_config_path: str,
@@ -91,13 +106,20 @@ class MusicLlama:
         llama_config = LlamaConfig.from_pretrained(model_config_path)
         model = LlamaForCausalLM(llama_config) 
         start_time = time.time()
-        checkpoint = torch.load(ckpt_dir, map_location="cpu")
+        try:
+            checkpoint = torch.load(ckpt_dir, map_location="cpu", weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(ckpt_dir, map_location="cpu")
+
         new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
+        new_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
         if missing_keys:
             print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
         if unexpected_keys:
             print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
+        if skipped_shape_mismatch:
+            print(f"Skipped shape-mismatch keys: {len(skipped_shape_mismatch)}")
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel
