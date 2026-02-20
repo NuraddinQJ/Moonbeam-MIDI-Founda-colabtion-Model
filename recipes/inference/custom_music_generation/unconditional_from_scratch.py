@@ -110,8 +110,9 @@ def main(
     del tokenizer_path, max_seq_len, finetuned_PEFT_weight_path
 
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU is required for this Colab quickstart. In Colab, set Runtime -> Change runtime type -> GPU.")
+    torch.cuda.manual_seed_all(seed)
 
     generator = _build_music_llama(
         ckpt_path=ckpt_path,
