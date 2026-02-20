@@ -25,6 +25,29 @@ from fairscale.nn.model_parallel.initialize import (
 
 class MusicLlama:
     @staticmethod
+    def _normalize_checkpoint_state_dict(checkpoint: dict) -> dict:
+        """Extract model weights from common checkpoint layouts."""
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Checkpoint must be a dict-like object.")
+
+        if "model_state_dict" in checkpoint and isinstance(checkpoint["model_state_dict"], dict):
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                new_state_dict[k[7:]] = v
+            else:
+                new_state_dict[k] = v
+        return new_state_dict
+
+    @staticmethod
     def build(
         ckpt_dir: str,
         model_config_path: str,
@@ -68,15 +91,13 @@ class MusicLlama:
         llama_config = LlamaConfig.from_pretrained(model_config_path)
         model = LlamaForCausalLM(llama_config) 
         start_time = time.time()
-        checkpoint = torch.load(ckpt_dir)
-        checkpoint = checkpoint['model_state_dict']
-        new_state_dict = {}
-        for k, v in checkpoint.items():
-            if k.startswith('module.'): # Check if the keys have 'module.' prefix and remove it if necessary
-                new_state_dict[k[7:]] = v
-            else:
-                new_state_dict[k] = v
+        checkpoint = torch.load(ckpt_dir, map_location="cpu")
+        new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        if missing_keys:
+            print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
+        if unexpected_keys:
+            print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel
