@@ -3,8 +3,95 @@ from typing import Optional
 
 import fire
 import torch
+from transformers import LlamaConfig, LlamaForCausalLM
 
 from generation import MusicLlama
+from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+
+
+def _normalize_checkpoint_state_dict(checkpoint: dict) -> dict:
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint must be a dict-like object.")
+
+    if "model_state_dict" in checkpoint and isinstance(checkpoint["model_state_dict"], dict):
+        state_dict = checkpoint["model_state_dict"]
+    elif "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+        state_dict = checkpoint["state_dict"]
+    elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    normalized = {}
+    for k, v in state_dict.items():
+        normalized[k[7:] if k.startswith("module.") else k] = v
+    return normalized
+
+
+def _resolve_model_config_path(ckpt_path: str, model_config_path: str) -> str:
+    model_config = Path(model_config_path)
+    small_config = model_config.with_name("model_config_small.json")
+    if not small_config.exists():
+        return str(model_config)
+
+    try:
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+
+    state_dict = _normalize_checkpoint_state_dict(checkpoint)
+    ckpt_hidden_size = state_dict.get("model.norm.weight").shape[0] if "model.norm.weight" in state_dict else None
+    if ckpt_hidden_size is None:
+        return str(model_config)
+
+    cfg_hidden = LlamaConfig.from_pretrained(str(model_config)).hidden_size
+    small_hidden = LlamaConfig.from_pretrained(str(small_config)).hidden_size
+    if ckpt_hidden_size == small_hidden and ckpt_hidden_size != cfg_hidden:
+        print(f"[info] Switching model config to checkpoint-compatible file: {small_config}")
+        return str(small_config)
+    return str(model_config)
+
+
+def _build_music_llama(
+    ckpt_path: str,
+    model_config_path: str,
+    seed: int,
+) -> MusicLlama:
+    model_config_path = _resolve_model_config_path(ckpt_path, model_config_path)
+    config = LlamaConfig.from_pretrained(model_config_path)
+    model = LlamaForCausalLM(config)
+
+    try:
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+
+    state_dict = _normalize_checkpoint_state_dict(checkpoint)
+    model_state = model.state_dict()
+    filtered_state = {
+        k: v for k, v in state_dict.items() if k in model_state and getattr(v, "shape", None) == model_state[k].shape
+    }
+    skipped = len(state_dict) - len(filtered_state)
+    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+    print(f"[info] Loaded keys: {len(filtered_state)} | skipped: {skipped} | missing: {len(missing)} | unexpected: {len(unexpected)}")
+
+    if torch.cuda.is_available():
+        model = model.to("cuda")
+    model.eval()
+
+    tokenizer = MusicTokenizer(
+        timeshift_vocab_size=config.onset_vocab_size,
+        dur_vocab_size=config.dur_vocab_size,
+        octave_vocab_size=config.octave_vocab_size,
+        pitch_class_vocab_size=config.pitch_class_vocab_size,
+        instrument_vocab_size=config.instrument_vocab_size,
+        velocity_vocab_size=config.velocity_vocab_size,
+    )
+
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        model = model.to(torch.bfloat16)
+
+    return MusicLlama(model, tokenizer, config)
 
 
 def main(
@@ -20,18 +107,15 @@ def main(
     finetuned_PEFT_weight_path: Optional[str] = None,
 ) -> None:
     """Generate a MIDI file from an SOS-only prompt (no dataset required)."""
+    del tokenizer_path, max_seq_len, finetuned_PEFT_weight_path
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    generator = MusicLlama.build(
-        ckpt_dir=ckpt_path,
+    generator = _build_music_llama(
+        ckpt_path=ckpt_path,
         model_config_path=model_config_path,
-        tokenizer_path=tokenizer_path,
-        max_seq_len=max_seq_len,
-        max_batch_size=1,
-        finetuned_PEFT_weight_path=finetuned_PEFT_weight_path,
         seed=seed,
     )
 
