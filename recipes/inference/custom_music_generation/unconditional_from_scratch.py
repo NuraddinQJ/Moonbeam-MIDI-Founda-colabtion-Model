@@ -134,6 +134,7 @@ def main(
     max_gen_len: int = 256,
     seed: int = 42,
     finetuned_PEFT_weight_path: Optional[str] = None,
+    num_samples: int = 1,
 ) -> None:
     """Generate a MIDI file from an SOS-only prompt (no dataset required)."""
     del tokenizer_path, max_seq_len, finetuned_PEFT_weight_path
@@ -149,21 +150,30 @@ def main(
         seed=seed,
     )
 
-    sos_prompt = [generator.tokenizer.sos_token_compound]
-    result = generator.music_completion(
-        prompt_tokens=[sos_prompt],
-        temperature=temperature,
-        top_p=top_p,
-        max_gen_len=max_gen_len,
-    )[0]
-
+    num_samples = max(1, int(num_samples))
     output_path = Path(output_midi_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"], generator.tokenizer)
-    if not sanitized_tokens:
-        raise RuntimeError("No valid generated tokens remained after sanitization.")
-    generator.tokenizer.compound_to_midi(sanitized_tokens).save(str(output_path))
-    print(f"Saved MIDI to: {output_path.resolve()} | sanitized_tokens={len(sanitized_tokens)}")
+
+    for i in range(num_samples):
+        sample_seed = seed + i
+        torch.manual_seed(sample_seed)
+        torch.cuda.manual_seed_all(sample_seed)
+
+        sos_prompt = [generator.tokenizer.sos_token_compound]
+        result = generator.music_completion(
+            prompt_tokens=[sos_prompt],
+            temperature=temperature,
+            top_p=top_p,
+            max_gen_len=max_gen_len,
+        )[0]
+
+        sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"], generator.tokenizer)
+        if not sanitized_tokens:
+            raise RuntimeError(f"No valid generated tokens remained after sanitization for sample {i}.")
+
+        sample_path = output_path if num_samples == 1 else output_path.with_name(f"{output_path.stem}_{i+1}{output_path.suffix}")
+        generator.tokenizer.compound_to_midi(sanitized_tokens).save(str(sample_path))
+        print(f"Saved MIDI to: {sample_path.resolve()} | sanitized_tokens={len(sanitized_tokens)} | seed={sample_seed}")
 
 
 if __name__ == "__main__":
