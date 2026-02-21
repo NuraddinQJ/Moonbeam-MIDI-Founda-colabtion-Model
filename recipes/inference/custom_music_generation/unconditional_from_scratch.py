@@ -94,6 +94,24 @@ def _build_music_llama(
     return MusicLlama(model, tokenizer, config)
 
 
+
+
+def _sanitize_generated_tokens(tokens):
+    cleaned = []
+    last_onset = 0
+    for row in tokens:
+        if len(row) != 6:
+            continue
+        onset, duration, octave, pitch, instrument, velocity = [int(x) for x in row]
+        if octave < 0 or pitch < 0 or instrument < 0 or velocity < 0:
+            continue
+        onset = max(0, onset)
+        duration = max(0, duration)
+        onset = max(onset, last_onset)
+        cleaned.append([onset, duration, octave, pitch, instrument, velocity])
+        last_onset = onset
+    return cleaned
+
 def main(
     ckpt_path: str,
     model_config_path: str = "src/llama_recipes/configs/model_config.json",
@@ -130,8 +148,11 @@ def main(
 
     output_path = Path(output_midi_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    result["generation"]["content"].save(str(output_path))
-    print(f"Saved MIDI to: {output_path.resolve()}")
+    sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"])
+    if not sanitized_tokens:
+        raise RuntimeError("No valid generated tokens remained after sanitization.")
+    generator.tokenizer.compound_to_midi(sanitized_tokens).save(str(output_path))
+    print(f"Saved MIDI to: {output_path.resolve()} | sanitized_tokens={len(sanitized_tokens)}")
 
 
 if __name__ == "__main__":
