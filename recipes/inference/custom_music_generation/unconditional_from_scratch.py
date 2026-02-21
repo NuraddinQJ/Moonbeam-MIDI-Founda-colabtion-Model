@@ -96,18 +96,29 @@ def _build_music_llama(
 
 
 
-def _sanitize_generated_tokens(tokens):
+def _sanitize_generated_tokens(tokens, tokenizer):
+    """Repair generated token rows for MIDI safety while preserving as much content as possible."""
     cleaned = []
     last_onset = 0
+    max_octave = max(0, tokenizer.octave_vocab_size - 3)
+    max_pitch = max(0, tokenizer.pitch_class_vocab_size - 3)
+    max_instrument = max(0, tokenizer.instrument_vocab_size - 3)
+    max_velocity = max(0, tokenizer.velocity_vocab_size - 3)
+
     for row in tokens:
         if len(row) != 6:
             continue
         onset, duration, octave, pitch, instrument, velocity = [int(x) for x in row]
-        if octave < 0 or pitch < 0 or instrument < 0 or velocity < 0:
-            continue
+
         onset = max(0, onset)
         duration = max(0, duration)
         onset = max(onset, last_onset)
+
+        octave = min(max(0, octave), max_octave)
+        pitch = min(max(0, pitch), max_pitch)
+        instrument = min(max(0, instrument), max_instrument)
+        velocity = min(max(0, velocity), max_velocity)
+
         cleaned.append([onset, duration, octave, pitch, instrument, velocity])
         last_onset = onset
     return cleaned
@@ -148,7 +159,7 @@ def main(
 
     output_path = Path(output_midi_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"])
+    sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"], generator.tokenizer)
     if not sanitized_tokens:
         raise RuntimeError("No valid generated tokens remained after sanitization.")
     generator.tokenizer.compound_to_midi(sanitized_tokens).save(str(output_path))
