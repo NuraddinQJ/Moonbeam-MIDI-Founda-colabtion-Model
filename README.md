@@ -7,6 +7,8 @@
 
 Colab-ready version of Moonbeam MIDI Foundation Model.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NuraddinQJ/Moonbeam-MIDI-Founda-colabtion-Model/blob/main/colab/Moonbeam_Quickstart.ipynb)
+
 This fork includes:
 - Fixed dependencies
 - Working Colab notebook (Under testing)
