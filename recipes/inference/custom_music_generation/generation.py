@@ -9,7 +9,6 @@ import time
 from transformers import (
     AutoTokenizer,
     LlamaForCausalLM,
-    LlamaForCausalLM_Conditional_Generation,
     LlamaConfig,
 )
 from llama_recipes.datasets.music_tokenizer import MusicTokenizer
@@ -24,6 +23,44 @@ from fairscale.nn.model_parallel.initialize import (
 
 
 class MusicLlama:
+    @staticmethod
+    def _normalize_checkpoint_state_dict(checkpoint: dict) -> dict:
+        """Extract model weights from common checkpoint layouts."""
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Checkpoint must be a dict-like object.")
+
+        if "model_state_dict" in checkpoint and isinstance(checkpoint["model_state_dict"], dict):
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                new_state_dict[k[7:]] = v
+            else:
+                new_state_dict[k] = v
+        return new_state_dict
+
+    @staticmethod
+    def _filter_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> Tuple[dict, List[str]]:
+        """Keep only checkpoint tensors that exist in model with matching shapes."""
+        model_state = model.state_dict()
+        filtered = {}
+        skipped = []
+        for key, value in state_dict.items():
+            if key not in model_state:
+                continue
+            if hasattr(value, "shape") and model_state[key].shape != value.shape:
+                skipped.append(key)
+                continue
+            filtered[key] = value
+        return filtered, skipped
+
     @staticmethod
     def build(
         ckpt_dir: str,
@@ -68,15 +105,20 @@ class MusicLlama:
         llama_config = LlamaConfig.from_pretrained(model_config_path)
         model = LlamaForCausalLM(llama_config) 
         start_time = time.time()
-        checkpoint = torch.load(ckpt_dir)
-        checkpoint = checkpoint['model_state_dict']
-        new_state_dict = {}
-        for k, v in checkpoint.items():
-            if k.startswith('module.'): # Check if the keys have 'module.' prefix and remove it if necessary
-                new_state_dict[k[7:]] = v
-            else:
-                new_state_dict[k] = v
+        try:
+            checkpoint = torch.load(ckpt_dir, map_location="cpu", weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(ckpt_dir, map_location="cpu")
+
+        new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
+        new_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        if missing_keys:
+            print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
+        if unexpected_keys:
+            print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
+        if skipped_shape_mismatch:
+            print(f"Skipped shape-mismatch keys: {len(skipped_shape_mismatch)}")
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel
@@ -207,7 +249,7 @@ class MusicLlama:
             
             #remove the sos_out token 
             next_decoder_token_out_reshaped = next_decoder_token_out[:, 1:].view(tokens.shape[0], -1 ,6) #batch*len_x, 6 --> batch, len_x, 6
-            next_decoder_token_lang = self.tokenizer.convert_from_language_tokens(next_decoder_token_out_reshaped) #batch, lenx, 6 
+            next_decoder_token_lang = self.tokenizer.convert_from_language_tokens(next_decoder_token_out_reshaped).to(tokens.device) #batch, lenx, 6 
             
             previous_onset = tokens[:, cur_pos-1, 0] #batch, 
             new_onset = previous_onset + next_decoder_token_lang.clone().detach()[:, -1, 0].to(previous_onset) #batch, + batch --> batch
