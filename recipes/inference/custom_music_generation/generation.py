@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import time
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple, TypedDict, Dict
 from accelerate.utils import is_xpu_available
@@ -62,6 +63,85 @@ class MusicLlama:
         return filtered, skipped
 
     @staticmethod
+    def checkpoint_signature(state_dict: dict) -> Dict[str, Optional[int]]:
+        """Infer a minimal architecture signature directly from checkpoint tensors."""
+        hidden_size = None
+        vocab_size = None
+        num_layers = 0
+
+        norm_weight = state_dict.get("model.norm.weight")
+        if hasattr(norm_weight, "shape") and len(norm_weight.shape) > 0:
+            hidden_size = int(norm_weight.shape[0])
+
+        embed_weight = state_dict.get("model.embed_tokens.weight")
+        if hasattr(embed_weight, "shape") and len(embed_weight.shape) >= 2:
+            vocab_size = int(embed_weight.shape[0])
+            hidden_size = int(embed_weight.shape[1]) if hidden_size is None else hidden_size
+
+        layer_indices = set()
+        for key in state_dict.keys():
+            match = re.match(r"model\.layers\.(\d+)\.", key)
+            if match:
+                layer_indices.add(int(match.group(1)))
+        if layer_indices:
+            num_layers = max(layer_indices) + 1
+
+        return {
+            "hidden_size": hidden_size,
+            "vocab_size": vocab_size,
+            "num_hidden_layers": num_layers if num_layers > 0 else None,
+        }
+
+    @staticmethod
+    def config_signature(config: LlamaConfig) -> Dict[str, Optional[int]]:
+        return {
+            "hidden_size": int(config.hidden_size),
+            "vocab_size": int(config.vocab_size),
+            "num_hidden_layers": int(config.num_hidden_layers),
+        }
+
+    @staticmethod
+    def summarize_checkpoint_load(
+        *,
+        state_dict: dict,
+        filtered_state_dict: dict,
+        skipped_shape_mismatch: List[str],
+        missing_keys: List[str],
+        unexpected_keys: List[str],
+    ) -> Dict[str, int]:
+        return {
+            "total_checkpoint_keys": len(state_dict),
+            "loaded_keys": len(filtered_state_dict),
+            "skipped_shape_mismatch": len(skipped_shape_mismatch),
+            "missing_keys": len(missing_keys),
+            "unexpected_keys": len(unexpected_keys),
+        }
+
+    @staticmethod
+    def validate_checkpoint_load(
+        *,
+        summary: Dict[str, int],
+        checkpoint_sig: Dict[str, Optional[int]],
+        config_sig: Dict[str, Optional[int]],
+        max_allowed_issues: int,
+        fail_fast: bool,
+    ) -> None:
+        issue_count = summary["skipped_shape_mismatch"] + summary["missing_keys"] + summary["unexpected_keys"]
+        signature_mismatches = [
+            f"{k}: checkpoint={checkpoint_sig.get(k)} config={config_sig.get(k)}"
+            for k in ("hidden_size", "num_hidden_layers", "vocab_size")
+            if checkpoint_sig.get(k) is not None and config_sig.get(k) is not None and checkpoint_sig.get(k) != config_sig.get(k)
+        ]
+
+        if fail_fast and (issue_count > max_allowed_issues or signature_mismatches):
+            raise RuntimeError(
+                "Checkpoint load validation failed. "
+                f"Summary={summary}. "
+                + (f"Architecture mismatch: {signature_mismatches}. " if signature_mismatches else "")
+                + f"Allowed issue threshold={max_allowed_issues}."
+            )
+
+    @staticmethod
     def build(
         ckpt_dir: str,
         model_config_path: str,
@@ -71,6 +151,8 @@ class MusicLlama:
         finetuned_PEFT_weight_path: str,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
+        fail_fast: bool = True,
+        max_allowed_load_issues: int = 8,
     ) -> "MusicLlama":
         """
         Build a Llama instance by initializing and loading a model checkpoint.
@@ -111,14 +193,32 @@ class MusicLlama:
             checkpoint = torch.load(ckpt_dir, map_location="cpu")
 
         new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
-        new_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
-        if missing_keys:
-            print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
-        if unexpected_keys:
-            print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
-        if skipped_shape_mismatch:
-            print(f"Skipped shape-mismatch keys: {len(skipped_shape_mismatch)}")
+        checkpoint_sig = MusicLlama.checkpoint_signature(new_state_dict)
+        config_sig = MusicLlama.config_signature(llama_config)
+        filtered_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
+        load_summary = MusicLlama.summarize_checkpoint_load(
+            state_dict=new_state_dict,
+            filtered_state_dict=filtered_state_dict,
+            skipped_shape_mismatch=skipped_shape_mismatch,
+            missing_keys=missing_keys,
+            unexpected_keys=unexpected_keys,
+        )
+        print(
+            "[info] Checkpoint load summary "
+            f"total={load_summary['total_checkpoint_keys']} "
+            f"loaded={load_summary['loaded_keys']} "
+            f"skipped_shape={load_summary['skipped_shape_mismatch']} "
+            f"missing={load_summary['missing_keys']} "
+            f"unexpected={load_summary['unexpected_keys']}"
+        )
+        MusicLlama.validate_checkpoint_load(
+            summary=load_summary,
+            checkpoint_sig=checkpoint_sig,
+            config_sig=config_sig,
+            max_allowed_issues=max_allowed_load_issues,
+            fail_fast=fail_fast,
+        )
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel
