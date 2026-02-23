@@ -1,9 +1,11 @@
 import os
+import atexit
 import json
 import dataclasses
 import fire
 import random
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from peft import get_peft_model, prepare_model_for_kbit_training
 from torch.distributed.fsdp import (
@@ -49,6 +51,15 @@ from llama_recipes.utils.train_utils import (
     get_policies,
 )
 from accelerate.utils import is_xpu_available
+
+
+
+def _safe_destroy_process_group():
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+atexit.register(_safe_destroy_process_group)
 
 def setup_wandb(train_config, fsdp_config, llama_config, **kwargs):
     try:
