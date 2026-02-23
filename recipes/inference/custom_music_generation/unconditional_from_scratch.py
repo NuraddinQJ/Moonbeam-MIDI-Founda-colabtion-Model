@@ -89,14 +89,6 @@ def _build_music_llama(
         missing_keys=missing,
         unexpected_keys=unexpected,
     )
-    print(
-        "[info] Checkpoint load summary "
-        f"total={load_summary['total_checkpoint_keys']} "
-        f"loaded={load_summary['loaded_keys']} "
-        f"skipped_shape={load_summary['skipped_shape_mismatch']} "
-        f"missing={load_summary['missing_keys']} "
-        f"unexpected={load_summary['unexpected_keys']}"
-    )
 
     MusicLlama.validate_checkpoint_load(
         summary=load_summary,
@@ -122,7 +114,7 @@ def _build_music_llama(
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         model = model.to(torch.bfloat16)
 
-    return MusicLlama(model, tokenizer, config), load_summary, model_config_path
+    return MusicLlama(model, tokenizer, config), load_summary, model_config_path, checkpoint_sig, config_sig
 
 
 def _sanitize_generated_tokens(tokens, tokenizer, enabled: bool = True):
@@ -173,7 +165,7 @@ def main(
         raise RuntimeError("CUDA GPU is required for this Colab quickstart. In Colab, set Runtime -> Change runtime type -> GPU.")
     torch.cuda.manual_seed_all(seed)
 
-    generator, load_summary, resolved_config_path = _build_music_llama(
+    generator, load_summary, resolved_config_path, checkpoint_sig, config_sig = _build_music_llama(
         ckpt_path=ckpt_path,
         model_config_path=model_config_path,
         seed=seed,
@@ -181,13 +173,32 @@ def main(
         max_allowed_load_issues=max_allowed_load_issues,
     )
 
-    print(
-        "[info] Scratch generation setup "
-        f"ckpt={Path(ckpt_path).resolve()} "
-        f"config={Path(resolved_config_path).resolve()} "
-        f"temperature={temperature} top_p={top_p} max_gen_len={max_gen_len} "
-        f"sanitize_tokens={sanitize_tokens} load_summary={load_summary}"
-    )
+    print("[diagnostic] checkpoint_load_summary")
+    print(f"checkpoint_total_keys={load_summary['total_checkpoint_keys']}")
+    print(f"loaded_keys={load_summary['loaded_keys']}")
+    print(f"skipped_shape_mismatch={load_summary['skipped_shape_mismatch']}")
+    print(f"missing_keys={load_summary['missing_keys']}")
+    print(f"unexpected_keys={load_summary['unexpected_keys']}")
+
+    print("[diagnostic] checkpoint_architecture")
+    print(f"hidden_size={checkpoint_sig.get('hidden_size')}")
+    print(f"num_layers={checkpoint_sig.get('num_hidden_layers')}")
+    print(f"vocab_size={checkpoint_sig.get('vocab_size')}")
+
+    print("[diagnostic] resolved_model_config")
+    print(f"config_file_used={Path(resolved_config_path).resolve()}")
+    print(f"hidden_size={config_sig.get('hidden_size')}")
+    print(f"num_layers={config_sig.get('num_hidden_layers')}")
+    print(f"vocab_size={config_sig.get('vocab_size')}")
+
+    print("[diagnostic] generation_parameters")
+    print(f"temperature={temperature}")
+    print(f"top_p={top_p}")
+    print(f"max_gen_len={max_gen_len}")
+    print(f"seed={seed}")
+
+    print("[diagnostic] sanitization")
+    print(f"sanitization_enabled={sanitize_tokens}")
 
     num_samples = max(1, int(num_samples))
     output_path = Path(output_midi_path)
