@@ -67,6 +67,7 @@ def _build_music_llama(
     ckpt_path: str,
     model_config_path: str,
     seed: int,
+    finetuned_PEFT_weight_path: Optional[str],
     fail_fast: bool,
     max_allowed_load_issues: int,
 ):
@@ -97,6 +98,12 @@ def _build_music_llama(
         max_allowed_issues=max_allowed_load_issues,
         fail_fast=fail_fast,
     )
+
+    if finetuned_PEFT_weight_path:
+        from peft import PeftModel
+
+        print(f"[info] Applying LoRA adapter: {Path(finetuned_PEFT_weight_path).resolve()}")
+        model = PeftModel.from_pretrained(model, finetuned_PEFT_weight_path, is_trainable=False)
 
     if torch.cuda.is_available():
         model = model.to("cuda")
@@ -158,7 +165,7 @@ def main(
     max_allowed_load_issues: int = 8,
 ) -> None:
     """Generate MIDI from SOS-only prompt with strict checkpoint-load validation."""
-    del tokenizer_path, max_seq_len, finetuned_PEFT_weight_path
+    del tokenizer_path, max_seq_len
 
     torch.manual_seed(seed)
     if not torch.cuda.is_available():
@@ -169,6 +176,7 @@ def main(
         ckpt_path=ckpt_path,
         model_config_path=model_config_path,
         seed=seed,
+        finetuned_PEFT_weight_path=finetuned_PEFT_weight_path,
         fail_fast=fail_fast_checkpoint_load,
         max_allowed_load_issues=max_allowed_load_issues,
     )
@@ -199,6 +207,7 @@ def main(
 
     print("[diagnostic] sanitization")
     print(f"sanitization_enabled={sanitize_tokens}")
+    print(f"active_lora={Path(finetuned_PEFT_weight_path).resolve() if finetuned_PEFT_weight_path else 'None (base model only)'}")
 
     num_samples = max(1, int(num_samples))
     output_path = Path(output_midi_path)
