@@ -111,14 +111,29 @@ class MusicLlama:
             checkpoint = torch.load(ckpt_dir, map_location="cpu")
 
         new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
-        new_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
-        if missing_keys:
-            print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
-        if unexpected_keys:
-            print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
-        if skipped_shape_mismatch:
-            print(f"Skipped shape-mismatch keys: {len(skipped_shape_mismatch)}")
+        model_state = model.state_dict()
+
+        missing_keys = sorted(set(model_state.keys()) - set(new_state_dict.keys()))
+        unexpected_keys = sorted(set(new_state_dict.keys()) - set(model_state.keys()))
+        skipped_shape_mismatch = [
+            key
+            for key in (set(new_state_dict.keys()) & set(model_state.keys()))
+            if getattr(new_state_dict[key], "shape", None) != model_state[key].shape
+        ]
+
+        if missing_keys or unexpected_keys or skipped_shape_mismatch:
+            def _preview(keys):
+                return ", ".join(keys[:8]) + (" ..." if len(keys) > 8 else "")
+
+            raise RuntimeError(
+                "Checkpoint/config mismatch detected. Refusing partial load for faithful inference. "
+                f"missing={len(missing_keys)} ({_preview(missing_keys)}), "
+                f"unexpected={len(unexpected_keys)} ({_preview(unexpected_keys)}), "
+                f"shape_mismatch={len(skipped_shape_mismatch)} ({_preview(skipped_shape_mismatch)}). "
+                "Use the exact matching checkpoint and model_config (or model_config_small.json when appropriate)."
+            )
+
+        model.load_state_dict(new_state_dict, strict=True)
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel

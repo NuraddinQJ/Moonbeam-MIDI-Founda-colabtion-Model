@@ -68,12 +68,29 @@ def _build_music_llama(
 
     state_dict = _normalize_checkpoint_state_dict(checkpoint)
     model_state = model.state_dict()
-    filtered_state = {
-        k: v for k, v in state_dict.items() if k in model_state and getattr(v, "shape", None) == model_state[k].shape
-    }
-    skipped = len(state_dict) - len(filtered_state)
-    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
-    print(f"[info] Loaded keys: {len(filtered_state)} | skipped: {skipped} | missing: {len(missing)} | unexpected: {len(unexpected)}")
+
+    missing = sorted(set(model_state.keys()) - set(state_dict.keys()))
+    unexpected = sorted(set(state_dict.keys()) - set(model_state.keys()))
+    shape_mismatch = [
+        key
+        for key in (set(state_dict.keys()) & set(model_state.keys()))
+        if getattr(state_dict[key], "shape", None) != model_state[key].shape
+    ]
+
+    if missing or unexpected or shape_mismatch:
+        def _preview(keys):
+            return ", ".join(keys[:8]) + (" ..." if len(keys) > 8 else "")
+
+        raise RuntimeError(
+            "Checkpoint/config mismatch detected. Refusing partial load for generation quality. "
+            f"missing={len(missing)} ({_preview(missing)}), "
+            f"unexpected={len(unexpected)} ({_preview(unexpected)}), "
+            f"shape_mismatch={len(shape_mismatch)} ({_preview(shape_mismatch)}). "
+            "Resolve by using the matching checkpoint + model config pair (or run with the correct model_config_small.json)."
+        )
+
+    model.load_state_dict(state_dict, strict=True)
+    print(f"[info] Strict load successful: {len(state_dict)} tensors")
 
     if torch.cuda.is_available():
         model = model.to("cuda")
@@ -97,9 +114,11 @@ def _build_music_llama(
 
 
 def _sanitize_generated_tokens(tokens, tokenizer):
-    """Repair generated token rows for MIDI safety while preserving as much content as possible."""
+    """Minimal validation: keep only valid events; never rewrite generated values."""
     cleaned = []
-    last_onset = 0
+    last_onset = -1
+    max_onset = max(0, tokenizer.timeshift_vocab_size - 3)
+    max_duration = max(0, tokenizer.dur_vocab_size - 3)
     max_octave = max(0, tokenizer.octave_vocab_size - 3)
     max_pitch = max(0, tokenizer.pitch_class_vocab_size - 3)
     max_instrument = max(0, tokenizer.instrument_vocab_size - 3)
@@ -110,14 +129,20 @@ def _sanitize_generated_tokens(tokens, tokenizer):
             continue
         onset, duration, octave, pitch, instrument, velocity = [int(x) for x in row]
 
-        onset = max(0, onset)
-        duration = max(1, duration)
-        onset = max(onset, last_onset)
-
-        octave = min(max(0, octave), max_octave)
-        pitch = min(max(0, pitch), max_pitch)
-        instrument = min(max(0, instrument), max_instrument)
-        velocity = min(max(0, velocity), max_velocity)
+        if onset < 0 or onset > max_onset:
+            continue
+        if duration <= 0 or duration > max_duration:
+            continue
+        if onset < last_onset:
+            continue
+        if not (0 <= octave <= max_octave):
+            continue
+        if not (0 <= pitch <= max_pitch):
+            continue
+        if not (0 <= instrument <= max_instrument):
+            continue
+        if not (0 <= velocity <= max_velocity):
+            continue
 
         cleaned.append([onset, duration, octave, pitch, instrument, velocity])
         last_onset = onset
