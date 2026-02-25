@@ -111,7 +111,7 @@ def _sanitize_generated_tokens(tokens, tokenizer):
         onset, duration, octave, pitch, instrument, velocity = [int(x) for x in row]
 
         onset = max(0, onset)
-        duration = max(0, duration)
+        duration = max(1, duration)
         onset = max(onset, last_onset)
 
         octave = min(max(0, octave), max_octave)
@@ -128,13 +128,15 @@ def main(
     model_config_path: str = "src/llama_recipes/configs/model_config.json",
     tokenizer_path: str = "recipes/benchmarks/inference_throughput/tokenizer/tokenizer.model",
     output_midi_path: str = "out.mid",
-    temperature: float = 0.9,
+    temperature: float = 1.0,
     top_p: float = 0.95,
     max_seq_len: int = 512,
-    max_gen_len: int = 256,
+    max_gen_len: int = 512,
     seed: int = 42,
     finetuned_PEFT_weight_path: Optional[str] = None,
     num_samples: int = 1,
+    min_generated_tokens: int = 32,
+    max_attempts_per_sample: int = 4,
 ) -> None:
     """Generate a MIDI file from an SOS-only prompt (no dataset required)."""
     del tokenizer_path, max_seq_len, finetuned_PEFT_weight_path
@@ -155,25 +157,48 @@ def main(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     for i in range(num_samples):
-        sample_seed = seed + i
-        torch.manual_seed(sample_seed)
-        torch.cuda.manual_seed_all(sample_seed)
+        sanitized_tokens = []
+        used_seed = None
+        used_temperature = None
 
-        sos_prompt = [generator.tokenizer.sos_token_compound]
-        result = generator.music_completion(
-            prompt_tokens=[sos_prompt],
-            temperature=temperature,
-            top_p=top_p,
-            max_gen_len=max_gen_len,
-        )[0]
+        for attempt in range(max(1, int(max_attempts_per_sample))):
+            sample_seed = seed + i + attempt
+            attempt_temperature = min(1.3, float(temperature) + 0.05 * attempt)
 
-        sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"], generator.tokenizer)
-        if not sanitized_tokens:
-            raise RuntimeError(f"No valid generated tokens remained after sanitization for sample {i}.")
+            torch.manual_seed(sample_seed)
+            torch.cuda.manual_seed_all(sample_seed)
+
+            sos_prompt = [generator.tokenizer.sos_token_compound]
+            result = generator.music_completion(
+                prompt_tokens=[sos_prompt],
+                temperature=attempt_temperature,
+                top_p=top_p,
+                max_gen_len=max_gen_len,
+            )[0]
+
+            sanitized_tokens = _sanitize_generated_tokens(result["generation"]["tokens"], generator.tokenizer)
+            if len(sanitized_tokens) >= max(1, int(min_generated_tokens)):
+                used_seed = sample_seed
+                used_temperature = attempt_temperature
+                break
+
+            print(
+                f"[warn] Sample {i+1}: attempt {attempt+1}/{max_attempts_per_sample} was too short "
+                f"({len(sanitized_tokens)} tokens). Retrying with a new seed/temperature."
+            )
+
+        if len(sanitized_tokens) < max(1, int(min_generated_tokens)):
+            raise RuntimeError(
+                f"Sample {i+1} stayed below min_generated_tokens={min_generated_tokens} after "
+                f"{max_attempts_per_sample} attempts."
+            )
 
         sample_path = output_path if num_samples == 1 else output_path.with_name(f"{output_path.stem}_{i+1}{output_path.suffix}")
         generator.tokenizer.compound_to_midi(sanitized_tokens).save(str(sample_path))
-        print(f"Saved MIDI to: {sample_path.resolve()} | sanitized_tokens={len(sanitized_tokens)} | seed={sample_seed}")
+        print(
+            f"Saved MIDI to: {sample_path.resolve()} | sanitized_tokens={len(sanitized_tokens)} "
+            f"| seed={used_seed} | temperature={used_temperature:.2f}"
+        )
 
 
 if __name__ == "__main__":

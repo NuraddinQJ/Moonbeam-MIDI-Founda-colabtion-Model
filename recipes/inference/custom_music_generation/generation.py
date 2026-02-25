@@ -267,7 +267,9 @@ class MusicLlama:
             eos_conditions_instr = next_decoder_token_lang.clone().detach()[:, -1, 4] == self.tokenizer.eos_instrument #batch,
             eos_conditions_vel = next_decoder_token_lang.clone().detach()[:, -1, 5] == self.tokenizer.eos_velocity #batch,
             eos_conditions_all_attr = torch.stack([eos_conditions_onset, eos_conditions_dur, eos_conditions_oct, eos_conditions_pitch, eos_conditions_instr, eos_conditions_vel], dim = -1) #batch, 6
-            eos_conditions = torch.any(eos_conditions_all_attr, dim = -1).to(input_mask) # batch, 1 
+            # Only stop when the model emits a full EOS compound token (all 6 attributes),
+            # not when a single attribute happens to match its EOS id.
+            eos_conditions = torch.all(eos_conditions_all_attr, dim = -1).to(input_mask) # batch, 1 
 
             # Update eos_reached based on the mask and EOS conditions
             eos_reached |= (~input_mask[:, cur_pos].squeeze(-1)) & eos_conditions   
@@ -287,16 +289,21 @@ class MusicLlama:
             probs = None
             """if logprobs:
                 probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]"""
-            # cut to after eos tok if any
-            for j, stop_token in enumerate([self.tokenizer.eos_timeshift, self.tokenizer.eos_dur, self.tokenizer.eos_octave, self.tokenizer.eos_pitch_class, self.tokenizer.eos_instrument, self.tokenizer.eos_velocity]):
-                if j==0: #skip onset
-                    continue
-                try:
-                    eos_idx = [row[j] for row in toks].index(stop_token)
-                    toks = toks[:eos_idx]
-                    probs = probs[:eos_idx] if logprobs else None
-                except ValueError:
-                    pass
+            # Cut after a full EOS compound token if it appears.
+            eos_row = [
+                self.tokenizer.eos_timeshift,
+                self.tokenizer.eos_dur,
+                self.tokenizer.eos_octave,
+                self.tokenizer.eos_pitch_class,
+                self.tokenizer.eos_instrument,
+                self.tokenizer.eos_velocity,
+            ]
+            try:
+                eos_idx = toks.index(eos_row)
+                toks = toks[:eos_idx]
+                probs = probs[:eos_idx] if logprobs else None
+            except ValueError:
+                pass
             out_tokens.append(toks)
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
