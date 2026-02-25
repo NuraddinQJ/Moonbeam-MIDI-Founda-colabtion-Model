@@ -111,14 +111,29 @@ class MusicLlama:
             checkpoint = torch.load(ckpt_dir, map_location="cpu")
 
         new_state_dict = MusicLlama._normalize_checkpoint_state_dict(checkpoint)
-        new_state_dict, skipped_shape_mismatch = MusicLlama._filter_state_dict_for_model(model, new_state_dict)
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
-        if missing_keys:
-            print(f"Missing keys while loading checkpoint: {len(missing_keys)}")
-        if unexpected_keys:
-            print(f"Unexpected keys while loading checkpoint: {len(unexpected_keys)}")
-        if skipped_shape_mismatch:
-            print(f"Skipped shape-mismatch keys: {len(skipped_shape_mismatch)}")
+        model_state = model.state_dict()
+
+        missing_keys = sorted(set(model_state.keys()) - set(new_state_dict.keys()))
+        unexpected_keys = sorted(set(new_state_dict.keys()) - set(model_state.keys()))
+        skipped_shape_mismatch = [
+            key
+            for key in (set(new_state_dict.keys()) & set(model_state.keys()))
+            if getattr(new_state_dict[key], "shape", None) != model_state[key].shape
+        ]
+
+        if missing_keys or unexpected_keys or skipped_shape_mismatch:
+            def _preview(keys):
+                return ", ".join(keys[:8]) + (" ..." if len(keys) > 8 else "")
+
+            raise RuntimeError(
+                "Checkpoint/config mismatch detected. Refusing partial load for faithful inference. "
+                f"missing={len(missing_keys)} ({_preview(missing_keys)}), "
+                f"unexpected={len(unexpected_keys)} ({_preview(unexpected_keys)}), "
+                f"shape_mismatch={len(skipped_shape_mismatch)} ({_preview(skipped_shape_mismatch)}). "
+                "Use the exact matching checkpoint and model_config (or model_config_small.json when appropriate)."
+            )
+
+        model.load_state_dict(new_state_dict, strict=True)
         
         if finetuned_PEFT_weight_path is not None:
             from peft import PeftModel
@@ -267,7 +282,9 @@ class MusicLlama:
             eos_conditions_instr = next_decoder_token_lang.clone().detach()[:, -1, 4] == self.tokenizer.eos_instrument #batch,
             eos_conditions_vel = next_decoder_token_lang.clone().detach()[:, -1, 5] == self.tokenizer.eos_velocity #batch,
             eos_conditions_all_attr = torch.stack([eos_conditions_onset, eos_conditions_dur, eos_conditions_oct, eos_conditions_pitch, eos_conditions_instr, eos_conditions_vel], dim = -1) #batch, 6
-            eos_conditions = torch.any(eos_conditions_all_attr, dim = -1).to(input_mask) # batch, 1 
+            # Only stop when the model emits a full EOS compound token (all 6 attributes),
+            # not when a single attribute happens to match its EOS id.
+            eos_conditions = torch.all(eos_conditions_all_attr, dim = -1).to(input_mask) # batch, 1 
 
             # Update eos_reached based on the mask and EOS conditions
             eos_reached |= (~input_mask[:, cur_pos].squeeze(-1)) & eos_conditions   
@@ -287,16 +304,21 @@ class MusicLlama:
             probs = None
             """if logprobs:
                 probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]"""
-            # cut to after eos tok if any
-            for j, stop_token in enumerate([self.tokenizer.eos_timeshift, self.tokenizer.eos_dur, self.tokenizer.eos_octave, self.tokenizer.eos_pitch_class, self.tokenizer.eos_instrument, self.tokenizer.eos_velocity]):
-                if j==0: #skip onset
-                    continue
-                try:
-                    eos_idx = [row[j] for row in toks].index(stop_token)
-                    toks = toks[:eos_idx]
-                    probs = probs[:eos_idx] if logprobs else None
-                except ValueError:
-                    pass
+            # Cut after a full EOS compound token if it appears.
+            eos_row = [
+                self.tokenizer.eos_timeshift,
+                self.tokenizer.eos_dur,
+                self.tokenizer.eos_octave,
+                self.tokenizer.eos_pitch_class,
+                self.tokenizer.eos_instrument,
+                self.tokenizer.eos_velocity,
+            ]
+            try:
+                eos_idx = toks.index(eos_row)
+                toks = toks[:eos_idx]
+                probs = probs[:eos_idx] if logprobs else None
+            except ValueError:
+                pass
             out_tokens.append(toks)
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
